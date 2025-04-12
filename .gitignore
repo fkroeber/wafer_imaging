@@ -1,6 +1,7 @@
-# ignore local & data folder
+# ignore some data-heavy folders
 local/
 data/
+results/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
