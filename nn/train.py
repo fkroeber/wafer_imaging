@@ -43,6 +43,7 @@ class Trainer:
         save_path: path to save results for model run
         wandb_project: project name for logging results with wandb
         wandb_runname: name current run logged with wandb
+        wandb_tags: tags for current run logged with wandb
         wandb_notes: additional notes/description for current run
         """
         self.data_path = kwargs.get("data_path")
@@ -58,6 +59,7 @@ class Trainer:
         self.save_path = kwargs.get("save_path")
         self.wandb_project = kwargs.get("wandb_project")
         self.wandb_runname = kwargs.get("wandb_runname")
+        self.wandb_tags = kwargs.get("wandb_tags", [])
         self.wandb_notes = kwargs.get("wandb_notes")
         # create save folder if necessary
         os.makedirs(self.save_path, exist_ok=True)
@@ -71,6 +73,7 @@ class Trainer:
         wandb.init(
             project=self.wandb_project,
             dir=self.save_path,
+            tags=self.wandb_tags,
             notes=self.wandb_notes,
         )
         wandb.run.name = self.wandb_runname
@@ -378,6 +381,13 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--wandb_runname", type=str, help="name current run logged with WandB"
+    )
+    parser.add_argument(
+        "--wandb_tags",
+        nargs="*",
+        default=[],
+        type=str,
+        help="tags for current run logged with WandB",
     )
     parser.add_argument(
         "--wandb_notes",
