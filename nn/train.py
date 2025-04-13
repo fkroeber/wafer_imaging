@@ -12,6 +12,16 @@ from .data import CSVDataset, RotationTransform
 from .losses import FocalLoss, HingeLoss
 from torch.utils.data import DataLoader
 from torchvision import transforms
+from torchmetrics import (
+    Accuracy,
+    AUROC,
+    AveragePrecision,
+    CalibrationError,
+    F1Score,
+    Precision,
+    Recall,
+    MetricCollection,
+)
 
 
 class Trainer:
@@ -93,6 +103,19 @@ class Trainer:
         num_classes = len(label_map)
         if self.loss in ["bce", "hinge", "hinge_squared"] and num_classes == 2:
             num_classes = 1
+        # determine metrics
+        task = "binary" if num_classes <= 2 else "multiclass"
+        self.metric_collection = MetricCollection(
+            {
+                "acc": Accuracy(task=task),
+                "f1": F1Score(task=task),
+                "precision": Precision(task=task),
+                "recall": Recall(task=task),
+                "auroc": AUROC(task=task),
+                "auprc": AveragePrecision(task=task),
+                "ece": CalibrationError(task=task),
+            }
+        )
         # init model & transforms
         model_kwargs = {
             "model_name": self.model_name,
@@ -181,8 +204,8 @@ class Trainer:
         )
         # create logging objects
         self.loss_history = {"train": [], "val": [], "test": []}
-        self.acc_history = {"train": [], "val": [], "test": []}
-
+        self.metric_history = {"train": [], "val": [], "test": []}
+        self.metric_collection.to(device)
         # start training
         since = time.time()
         for epoch in range(self.max_epochs):
@@ -195,8 +218,8 @@ class Trainer:
                     model_ft.train()
                 else:
                     model_ft.eval()
+                self.metric_collection.reset()
                 running_loss = 0.0
-                running_corrects = 0
                 # iterate over data
                 for inputs, labels in self.dataloaders[phase]:
                     inputs = inputs.to(device, dtype=torch.float)
@@ -205,21 +228,22 @@ class Trainer:
                     optimizer_ft.zero_grad()
                     # forward pass
                     with torch.set_grad_enabled(phase == "train"):
-                        if self.loss == "ce":
+                        if self.loss in ["ce", "focal"]:
                             # excpects outputs (N,C), labels (N)
                             outputs = model_ft(inputs)
                             loss = criterion(outputs, labels)
-                            _, preds = torch.max(outputs, 1)
-                        elif self.loss == "focal":
-                            # excpects outputs (N,C), labels (N)
-                            outputs = model_ft(inputs)
-                            loss = criterion(outputs, labels)
-                            _, preds = torch.max(outputs, 1)
+                            probs = (
+                                torch.softmax(outputs, dim=1)[:, 1]
+                                if outputs.shape[1] > 1
+                                else outputs.squeeze()
+                            )
+                            preds = torch.argmax(outputs, dim=1)
                         elif self.loss == "bce":
                             # excpects outputs (N,), labels (N)
                             outputs = model_ft(inputs).view(-1)
                             loss = criterion(outputs, labels.float())
-                            preds = torch.round(torch.sigmoid(outputs))
+                            probs = torch.sigmoid(outputs)
+                            preds = torch.round(probs)
                         elif self.loss in ["hinge", "hinge_squared"]:
                             # converts outputs & targets to range [-1, 1] first
                             outputs = model_ft(inputs).view(-1)
@@ -227,7 +251,8 @@ class Trainer:
                             labels_ = torch.clone(labels)
                             labels_[labels_ == 0] = -1
                             loss = criterion(outputs_, labels_)
-                            preds = torch.round(torch.sigmoid(outputs))
+                            probs = torch.sigmoid(outputs)
+                            preds = torch.round(probs)
                         else:
                             raise ValueError(f"Invalid loss function: {self.loss}")
                     # backward pass only in training phase
@@ -235,21 +260,31 @@ class Trainer:
                         loss.backward()
                         optimizer_ft.step()
                     # add iteration statistics to epoch summary
+                    for name, metric in self.metric_collection.items():
+                        if name in ["auroc", "auprc", "ece"]:
+                            metric.update(probs, labels)
+                        else:
+                            metric.update(preds, labels)
                     running_loss += loss.item() * inputs.size(0)
-                    running_corrects += torch.sum(preds == labels.data).item()
                 # calculate & log epoch loss & accs
                 epoch_loss = running_loss / len(self.dataloaders[phase].dataset)
-                epoch_acc = running_corrects / len(self.dataloaders[phase].dataset)
-                self.acc_history[phase].append(epoch_acc)
+                epoch_metrics = self.metric_collection.compute()
                 self.loss_history[phase].append(epoch_loss)
+                self.metric_history[phase].append(
+                    {k: v.item() for k, v in epoch_metrics.items()}
+                )
+                # log & print information
                 wandb.log(
                     {
                         f"loss_{phase}": epoch_loss,
-                        f"acc_{phase}": epoch_acc,
+                        **{f"{k}_{phase}": v for k, v in epoch_metrics.items()},
                     },
                     step=epoch,
                 )
-                print(f"{phase} loss: {epoch_loss:.4f} acc: {epoch_acc:.4f}")
+                print(
+                    f"{phase}\t loss: {epoch_loss:.4f}, "
+                    + ", ".join([f"{k}: {v:.4f}" for k, v in epoch_metrics.items()])
+                )
                 if phase == "test":
                     print()
                 # evaluate early stopping
@@ -270,16 +305,19 @@ class Trainer:
         pd.DataFrame(self.loss_history).to_csv(
             os.path.join(self.save_path, "model_loss.csv"), index=False
         )
-        pd.DataFrame(self.acc_history).to_csv(
-            os.path.join(self.save_path, "model_acc.csv"), index=False
+        pd.DataFrame(self.metric_history).to_csv(
+            os.path.join(self.save_path, "model_metrics.csv"), index=False
         )
         self._update_logs()
         # set summary vals based on early stopping point
         if self.patience < self.max_epochs:
             val_idx_min = np.argmin(self.loss_history["val"])
-            for metric in ["acc", "loss"]:
+            for metric in ["loss", *self.metric_collection.keys()]:
                 for phase in ["train", "val", "test"]:
-                    final_val = eval(f"self.{metric}_history['{phase}'][{val_idx_min}]")
+                    if metric == "loss":
+                        final_val = self.loss_history[phase][val_idx_min]
+                    else:
+                        final_val = self.metric_history[phase][val_idx_min][metric]
                     wandb.run.summary[f"best_{metric}_{phase}"] = final_val
         wandb.finish()
 
