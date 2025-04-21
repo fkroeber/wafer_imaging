@@ -19,7 +19,7 @@ For Windows
 python -m venv wafer
 wafer\Scripts\activate
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r reqs_windows.txt
 ```
 
 For Linux/macOS
@@ -27,12 +27,12 @@ For Linux/macOS
 python -m venv wafer
 source wafer/bin/activate
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r reqs_unix.txt
 ```
 
 ### Step 2b: ...via conda
 ```
 conda create -n wafer python=3.10
 conda activate wafer
-pip install -r requirements.txt
+pip install -r reqs_unix.txt
 ```
